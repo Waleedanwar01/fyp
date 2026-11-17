@@ -80,7 +80,7 @@ class SubscriptionInactive(APIException):
 
 class WritesNeedUsableSubscription(IsAgencyMember):
     """Read-only lock for a lapsed subscription (expired, cancelled, past
-    due, paused, or never paid): the agency can still *see* everything --
+    due, paused): the agency can still *see* everything --
     clients, scores, runs, reports -- but every create/edit/delete/run is
     refused until it renews. Agencies with no subscription record at all
     (legacy accounts, created before plans existed) are left as they were."""
@@ -91,9 +91,28 @@ class WritesNeedUsableSubscription(IsAgencyMember):
         if request.method in SAFE_METHODS:
             return True
         subscription = getattr(request.user.agency, "subscription", None)
-        if subscription is not None and not subscription.is_usable():
-            if subscription.status == subscription.Status.PENDING:
-                raise SubscriptionRequired
+        if subscription is not None and subscription.status in LAPSED_STATUSES:
             raise SubscriptionInactive
         return True
+
+
+# Paid before, now lapsed -> read-only. PENDING (never paid) is handled by
+# the /subscribe gate instead, and can still set up clients meanwhile.
+LAPSED_STATUSES = ("expired", "cancelled", "past_due", "paused")
+
+
+class SchedulesNeedSubscription(IsAgencyMember):
+    """Scheduled campaigns are the billable surface: closed entirely until
+    the agency has paid once (no subscription / PENDING -> 402), readable
+    but frozen while lapsed, fully open while active."""
+
+    def has_permission(self, request, view):
+        if not super().has_permission(request, view):
+            return False
+        subscription = getattr(request.user.agency, "subscription", None)
+        if subscription is None or subscription.status == subscription.Status.PENDING:
+            raise SubscriptionRequired
+        if subscription.is_usable() or request.method in SAFE_METHODS:
+            return True
+        raise SubscriptionInactive
 

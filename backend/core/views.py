@@ -60,7 +60,12 @@ from .models import (
 )
 from .pdf_invoice import generate_invoice_pdf
 from .pdf_report import generate_client_pdf_report
-from .permissions import IsAgencyAdmin, IsAgencyMember, WritesNeedUsableSubscription
+from .permissions import (
+    IsAgencyAdmin,
+    IsAgencyMember,
+    SchedulesNeedSubscription,
+    WritesNeedUsableSubscription,
+)
 from .serializers import (
     AcceptInviteSerializer,
     AgencyCreateSerializer,
@@ -1436,7 +1441,7 @@ class PromptScheduleViewSet(AgencyScopedModelViewSet):
     calls for: `estimate` (never saves anything) and `resume` (the only
     way a paused schedule becomes active again, AVTR_SPEC §14).
 
-    Writes need a usable subscription (WritesNeedUsableSubscription), like the base CRM resources
+    Gated by SchedulesNeedSubscription, unlike the base CRM resources
     (clients/brands/competitors/prompts) -- a pending agency can still
     set up its account while waiting on manual activation, but scheduled
     campaigns are the actual metered/billable surface, so they stay
@@ -1444,7 +1449,7 @@ class PromptScheduleViewSet(AgencyScopedModelViewSet):
 
     serializer_class = PromptScheduleSerializer
     model = PromptSchedule
-    permission_classes = [WritesNeedUsableSubscription]
+    permission_classes = [SchedulesNeedSubscription]
 
     def get_queryset(self):
         return PromptSchedule.objects.all().select_related("client", "brand").prefetch_related("prompts")

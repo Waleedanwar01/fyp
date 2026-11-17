@@ -30,6 +30,7 @@ from .ai_providers import (
     get_provider_client,
 )
 from .billing import (
+    activate_subscription,
     close_billing_period,
     estimate_usage,
     get_or_create_current_billing_period,
@@ -1042,10 +1043,10 @@ class MatchingTests(TestCase):
     correctness matters independent of anything HTTP-related."""
 
     def test_matches_primary_name_case_insensitively(self):
-        matches = find_name_mentions("We recommend RankLens for this.", "avtr")
+        matches = find_name_mentions("We recommend RankLens for this.", "ranklens")
         self.assertEqual(len(matches), 1)
         self.assertTrue(matches[0].is_primary)
-        self.assertEqual(matches[0].term, "avtr")
+        self.assertEqual(matches[0].term, "ranklens")
 
     def test_matches_an_alias(self):
         matches = find_name_mentions("Avatar Inc is a great choice.", "RankLens", aliases=["Avatar Inc"])
@@ -6791,48 +6792,96 @@ class SubscriptionExpiryTaskTests(TestCase):
             # schedules) still exists, just paused where it was live.
             self.assertTrue(Client.objects.filter(id=self.client_obj.id).exists())
             self.assertTrue(Prompt.objects.filter(id=self.prompt.id).exists())
-        self.assertEqual(active_schedule.status, PromptSchedule.Status.PAUSED)
-        self.assertEqual(limit_paused_schedule.status, PromptSchedule.Status.PAUSED)
+        self.assertEqual(active_schedule.status, PromptSchedule.Status.PAUSED_SUBSCRIPTION)
+        self.assertEqual(limit_paused_schedule.status, PromptSchedule.Status.PAUSED_SUBSCRIPTION)
         # Already-completed schedules are left alone -- expiry only acts
         # on schedules that were actually still live.
         self.assertEqual(completed_schedule.status, PromptSchedule.Status.COMPLETED)
 
-    def test_renewal_preserves_history_and_paused_schedules_require_manual_resume(self):
-        # AVTR_SPEC §14: renewing a subscription (moving its dates and
-        # status back to active) must NOT auto-resume anything that was
-        # paused -- only an explicit user resume action does that.
+    def test_renewal_preserves_history_and_resumes_schedules_paused_by_expiry(self):
+        # Expiry pauses live schedules as PAUSED_SUBSCRIPTION; renewing
+        # brings exactly those back (clamped to the new period), while a
+        # schedule the user paused themselves stays paused.
+        today = timezone.now().date()
         subscription = _make_subscription(
             self.agency, self.plan,
-            current_period_start=date(2026, 6, 1), current_period_end=date(2026, 7, 1),
+            current_period_start=today - timedelta(days=31), current_period_end=today - timedelta(days=1),
         )
         with use_agency(self.agency):
             schedule = PromptSchedule.objects.create(
                 agency=self.agency, client=self.client_obj, brand=self.brand,
-                frequency=PromptSchedule.Frequency.DAILY, start_date=date(2026, 6, 1), end_date=date(2026, 6, 30),
-                status=PromptSchedule.Status.ACTIVE, providers=[AIProvider.OPENAI],
+                frequency=PromptSchedule.Frequency.DAILY, start_date=today - timedelta(days=10),
+                end_date=today + timedelta(days=90), status=PromptSchedule.Status.ACTIVE, providers=[AIProvider.OPENAI],
             )
             schedule.prompts.set([self.prompt])
+            user_paused = PromptSchedule.objects.create(
+                agency=self.agency, client=self.client_obj, brand=self.brand,
+                frequency=PromptSchedule.Frequency.DAILY, start_date=today - timedelta(days=10),
+                end_date=today + timedelta(days=5), status=PromptSchedule.Status.PAUSED, providers=[AIProvider.OPENAI],
+            )
+            user_paused.prompts.set([self.prompt])
             old_period = get_or_create_current_billing_period(subscription)
             old_period.prompt_runs_used = 400
             old_period.save(update_fields=["prompt_runs_used"])
 
         tasks.expire_overdue_subscriptions()
-        with use_agency(self.agency):
-            schedule.refresh_from_db()
-        self.assertEqual(schedule.status, PromptSchedule.Status.PAUSED)
 
-        # Renewal: an admin/billing process moves the subscription back
-        # to active with a fresh period -- old usage history is untouched.
         with use_agency(self.agency):
-            subscription.status = Subscription.Status.ACTIVE
-            subscription.current_period_start = date(2026, 7, 1)
-            subscription.current_period_end = date(2026, 7, 31)
-            subscription.save()
             schedule.refresh_from_db()
+        self.assertEqual(schedule.status, PromptSchedule.Status.PAUSED_SUBSCRIPTION)
+
+        with use_agency(self.agency):
+            subscription.refresh_from_db()
+            activate_subscription(subscription)
+            schedule.refresh_from_db()
+            user_paused.refresh_from_db()
             old_period.refresh_from_db()
 
-        self.assertEqual(schedule.status, PromptSchedule.Status.PAUSED)  # still paused -- no auto-resume
+        self.assertEqual(schedule.status, PromptSchedule.Status.ACTIVE)
+        self.assertEqual(schedule.end_date, subscription.current_period_end)  # never past the new period
+        self.assertEqual(user_paused.status, PromptSchedule.Status.PAUSED)
         self.assertEqual(old_period.prompt_runs_used, 400)  # old period's history untouched
+
+    def test_auto_renew_with_a_valid_card_renews_instead_of_expiring(self):
+        today = timezone.now().date()
+        subscription = _make_subscription(
+            self.agency, self.plan,
+            current_period_start=today - timedelta(days=31), current_period_end=today - timedelta(days=1),
+        )
+        with use_agency(self.agency):
+            subscription.auto_renew = True
+            subscription.card_brand, subscription.card_last4 = "visa", "4242"
+            subscription.card_exp_month, subscription.card_exp_year = 12, today.year + 3
+            subscription.save()
+
+        tasks.expire_overdue_subscriptions()
+
+        with use_agency(self.agency):
+            subscription.refresh_from_db()
+            renewed_notices = Notification.objects.filter(type=Notification.Type.SUBSCRIPTION_RENEWED).count()
+        self.assertEqual(subscription.status, Subscription.Status.ACTIVE)
+        self.assertGreater(subscription.current_period_end, today)
+        self.assertEqual(renewed_notices, 1)
+
+    def test_auto_renew_with_an_expired_card_expires_and_says_why(self):
+        today = timezone.now().date()
+        subscription = _make_subscription(
+            self.agency, self.plan,
+            current_period_start=today - timedelta(days=31), current_period_end=today - timedelta(days=1),
+        )
+        with use_agency(self.agency):
+            subscription.auto_renew = True
+            subscription.card_brand, subscription.card_last4 = "visa", "4242"
+            subscription.card_exp_month, subscription.card_exp_year = 1, today.year - 1
+            subscription.save()
+
+        tasks.expire_overdue_subscriptions()
+
+        with use_agency(self.agency):
+            subscription.refresh_from_db()
+            failed_notices = Notification.objects.filter(type=Notification.Type.SUBSCRIPTION_RENEWAL_FAILED).count()
+        self.assertEqual(subscription.status, Subscription.Status.EXPIRED)
+        self.assertEqual(failed_notices, 1)
 
     def test_close_expired_billing_periods_closes_overdue_open_periods_only(self):
         subscription = _make_subscription(
@@ -7295,13 +7344,44 @@ class SubscriptionChoosePlanAPITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["billing_interval"], "monthly")
 
-    def test_rejects_when_agency_already_has_a_subscription(self):
-        _make_subscription(self.agency, self.plan, status=Subscription.Status.ACTIVE)
+    def test_active_subscription_switches_plan_in_place(self):
+        # Plan change from Billing: the one subscription row is updated
+        # (never a second one), and it stays active.
+        subscription = _make_subscription(self.agency, self.plan, status=Subscription.Status.ACTIVE)
+        self._login("admin@old.test")
+        response = self.api.post(
+            "/api/v1/subscription/choose-plan/",
+            {"plan": self.plan.slug, "billing_interval": "yearly"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        with use_agency(self.agency):
+            subscription.refresh_from_db()
+            self.assertEqual(Subscription.objects.filter(agency=self.agency).count(), 1)
+        self.assertEqual(subscription.status, Subscription.Status.ACTIVE)
+        self.assertEqual(subscription.billing_interval, Subscription.BillingInterval.YEARLY)
+
+    def test_expired_subscription_makes_the_workspace_read_only(self):
+        _make_subscription(self.agency, self.plan, status=Subscription.Status.EXPIRED)
+        self._login("admin@old.test")
+        self.assertEqual(self.api.get("/api/v1/clients/").status_code, status.HTTP_200_OK)
+        self.assertEqual(self.api.get("/api/v1/schedules/").status_code, status.HTTP_200_OK)
+        response = self.api.post("/api/v1/clients/", {"name": "New client"}, format="json")
+        self.assertEqual(response.status_code, 402)
+        self.assertEqual(response.data["detail"].code, "subscription_inactive")
+
+    def test_expired_subscription_can_subscribe_again(self):
+        # Month-end lockout regression: an expired agency used to get
+        # "already has a subscription" and could never pay again.
+        subscription = _make_subscription(self.agency, self.plan, status=Subscription.Status.EXPIRED)
         self._login("admin@old.test")
         response = self.api.post(
             "/api/v1/subscription/choose-plan/", {"plan": self.plan.slug}, format="json"
         )
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        with use_agency(self.agency):
+            subscription.refresh_from_db()
+        self.assertEqual(subscription.status, Subscription.Status.PENDING)
 
     def test_plain_member_cannot_choose_a_plan(self):
         self._login("member@old.test")
