@@ -1,0 +1,69 @@
+# Optional: run Postgres on the server instead of Neon. Layer it on top of
+# the main file:
+#
+#   docker compose --env-file .env.prod #     -f docker-compose.prod.yml -f docker-compose.selfhosted-db.yml up -d --build
+#
+# Needs POSTGRES_PASSWORD, AVTR_OWNER_PASSWORD and AVTR_APP_PASSWORD in
+# .env.prod (letters and digits only). Roles are created on first boot by
+# docker/prod-db-init.sh; `db_backup` keeps 14 days of nightly dumps. The
+# database starts empty -- copy existing data over from Neon first.
+
+x-database-env: &database-env
+  # The app connects as the restricted role (row-level security always
+  # applies); migrations run as the owner.
+  DATABASE_URL: postgresql://avtr_app:${AVTR_APP_PASSWORD}@db:5432/avtr
+  MIGRATE_DATABASE_URL: postgresql://avtr_owner:${AVTR_OWNER_PASSWORD}@db:5432/avtr
+  # No per-hour billing here, so keep connections open between requests.
+  DB_CONN_MAX_AGE: "60"
+
+x-needs-db: &needs-db
+  environment: *database-env
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      AVTR_OWNER_PASSWORD: ${AVTR_OWNER_PASSWORD}
+      AVTR_APP_PASSWORD: ${AVTR_APP_PASSWORD}
+    volumes:
+      - avtr_pg_data:/var/lib/postgresql/data
+      - ./docker/prod-db-init.sh:/docker-entrypoint-initdb.d/10-avtr-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d avtr"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Nightly compressed dump of the avtr database, kept for 14 days in the
+  # avtr_pg_backups volume. Copy them off the server regularly too.
+  db_backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${AVTR_OWNER_PASSWORD}
+    volumes:
+      - avtr_pg_backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          pg_dump -h db -U avtr_owner -d avtr -Fc -f /backups/avtr-$$(date +%Y%m%d-%H%M).dump             && find /backups -name 'avtr-*.dump' -mtime +14 -delete
+          sleep 86400
+        done
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend: *needs-db
+  celery_worker: *needs-db
+  celery_beat: *needs-db
+
+volumes:
+  avtr_pg_data:
+  avtr_pg_backups:

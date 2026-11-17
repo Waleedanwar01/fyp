@@ -1,0 +1,48 @@
+# Python / Django
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.sqlite3
+staticfiles/
+media/
+celerybeat-schedule*
+celerybeat.pid
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Env files (any variant, any depth)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.npm-cache/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+# Project docs (invoices, reports, screenshots, videos) stay local only.
+docs/
+SUPERUSER.txt
+
+# Not part of the FYP code: client-project reports and local tool settings.
+PROGRESS.md
+week-12-status-update.md
+sample-apex-cloud-report.pdf
+backend/generate_client_docs.py
+.claude/

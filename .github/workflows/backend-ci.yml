@@ -1,0 +1,58 @@
+name: Backend CI
+
+on:
+  push
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: avtr
+          POSTGRES_PASSWORD: avtr
+          POSTGRES_DB: avtr
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U avtr -d avtr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      SECRET_KEY: ci-only-secret-not-for-production
+      DEBUG: "True"
+      # A restricted role, not the service container's bootstrap superuser
+      # (`avtr`) -- superusers unconditionally bypass row-level security
+      # regardless of FORCE, which would make the RLS tests pass for the
+      # wrong reason. Mirrors the avtr_app/neondb_owner split used against
+      # the real Neon database. ci_app creates its own test_* database via
+      # CREATEDB and owns everything in it, so no extra GRANTs are needed.
+      DATABASE_URL: postgresql://ci_app:ci_app@localhost:5432/avtr
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create restricted DB role for the app
+        env:
+          PGPASSWORD: avtr
+        run: psql -h localhost -U avtr -d avtr -c "CREATE ROLE ci_app WITH LOGIN CREATEDB PASSWORD 'ci_app';"
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        working-directory: backend
+        run: ruff check .
+
+      - name: Test
+        working-directory: backend
+        run: python manage.py test core

@@ -1,0 +1,37 @@
+# Optional overlay: adds Cloudflare Tunnel so the VPS needs ZERO public
+# inbound ports for web traffic (not even 80/443) -- cloudflared makes an
+# outbound-only connection to Cloudflare, which then routes public
+# requests to it. Combine with the prod stack:
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.cloudflare.yml --env-file .env.prod up -d --build
+#
+# Setup (one-time, in the Cloudflare dashboard -- see docs/DEPLOYMENT.md
+# for the full walkthrough):
+#   1. Zero Trust -> Networks -> Tunnels -> Create a tunnel -> name it
+#      (e.g. "avtr-prod") -> connector type: Docker.
+#   2. Cloudflare shows a `docker run ... cloudflare/cloudflared ... --token eyJ...`
+#      command -- copy just the token value into .env.prod as
+#      CLOUDFLARE_TUNNEL_TOKEN (do NOT run that docker command directly;
+#      this overlay runs the same image properly wired into the app's
+#      own Docker network instead).
+#   3. In the tunnel's "Public Hostname" tab: add a hostname (e.g.
+#      app.yourdomain.com) -> Service: HTTP -> URL: nginx:80 (the
+#      internal Docker service name+port, not the VPS's public IP).
+#   4. Once the tunnel is running (docker compose ps should show
+#      cloudflared as Up), that hostname is live -- no port-forwarding,
+#      no Let's Encrypt, no open port 80/443 on the VPS at all.
+#
+# After this is working, lock the VPS firewall down to deny 80/443
+# entirely (see docs/DEPLOYMENT.md) -- nginx's published port becomes
+# reachable only from the VPS itself and from cloudflared over the
+# internal Docker network, never directly from the public internet.
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - nginx

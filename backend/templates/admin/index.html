@@ -1,0 +1,11 @@
+{% extends "admin/index.html" %}
+{% block content %}
+<div class="module" style="margin-bottom:20px">
+  <table style="width:100%"><caption>Monitoring</caption>
+    <tr><th scope="row"><a href="{% url 'admin:system-health' %}">System health</a></th>
+        <td>Database, task queue, AI engines (Gemini), payments, email and security at a glance.</td>
+        <td><a href="{% url 'admin:system-health' %}" class="viewlink">Open</a></td></tr>
+  </table>
+</div>
+{{ block.super }}
+{% endblock %}

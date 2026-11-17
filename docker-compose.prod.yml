@@ -1,0 +1,92 @@
+# Production stack for a VPS. Differences from docker-compose.yml (local dev):
+#   - The database is Neon (DATABASE_URL / MIGRATE_DATABASE_URL in
+#     .env.prod). To run Postgres on the server itself instead, add
+#     docker-compose.selfhosted-db.yml (see that file).
+#   - No bind mounts -- code is baked into the image at build time, so
+#     there's no risk of a host .env file leaking in (see backend/.dockerignore).
+#   - backend runs the Dockerfile's own CMD (collectstatic + migrate +
+#     gunicorn), not runserver.
+#   - frontend builds via Dockerfile.prod (`next build`, standalone server),
+#     not the dev server.
+#   - nginx is the only service reachable from outside the VPS -- redis,
+#     backend, frontend, celery_worker, celery_beat all stay on the
+#     internal Docker network only.
+#   - `restart: unless-stopped` everywhere, so the stack survives a VPS reboot.
+#
+# Deploy: docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    image: avtr-backend:latest
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/admin/login/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  celery_worker:
+    image: avtr-backend:latest
+    restart: unless-stopped
+    command: celery -A config worker --loglevel=info
+    env_file:
+      - .env.prod
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  celery_beat:
+    image: avtr-backend:latest
+    restart: unless-stopped
+    command: celery -A config beat --loglevel=info
+    env_file:
+      - .env.prod
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
+    image: avtr-frontend:latest
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend

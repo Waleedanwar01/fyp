@@ -1,0 +1,46 @@
+{% extends "admin/base_site.html" %}
+{% block extrastyle %}{{ block.super }}
+<style>
+  .hc-top{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 20px}
+  .hc-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;font-weight:600;font-size:14px}
+  .hc-ok{background:#dcfce7;color:#166534}.hc-warn{background:#fef3c7;color:#92400e}.hc-fail{background:#fee2e2;color:#991b1b}
+  .hc-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .hc-ok .hc-dot,.hc-dot.ok{background:#16a34a}.hc-warn .hc-dot,.hc-dot.warn{background:#d97706}.hc-fail .hc-dot,.hc-dot.fail{background:#dc2626}
+  .hc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px}
+  .hc-card{border:1px solid var(--hairline-color,#e5e7eb);border-radius:12px;overflow:hidden;background:var(--body-bg,#fff)}
+  .hc-card h2{margin:0;padding:12px 16px;font-size:15px;display:flex;justify-content:space-between;align-items:center;background:var(--darkened-bg,#f8fafc);color:var(--body-fg)}
+  .hc-row{display:grid;grid-template-columns:16px 1fr auto;gap:10px;padding:11px 16px;border-top:1px solid var(--hairline-color,#e5e7eb);align-items:start}
+  .hc-row .n{font-weight:600}.hc-row .d{color:var(--body-quiet-color,#64748b);font-size:12.5px;margin-top:2px;line-height:1.45}
+  .hc-row .ms{font-variant-numeric:tabular-nums;color:var(--body-quiet-color,#64748b);font-size:12px;white-space:nowrap}
+  .hc-row .hc-dot{margin-top:5px}
+  .hc-actions a{margin-left:8px}
+</style>
+{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> &rsaquo; System health</div>{% endblock %}
+{% block content %}
+<div class="hc-top">
+  <span class="hc-pill hc-{{ overall }}"><span class="hc-dot"></span>
+    {% if overall == "ok" %}All systems operational{% elif overall == "warn" %}Running, with warnings{% else %}Action needed{% endif %}
+    &nbsp;&middot;&nbsp;{{ counts.ok }} ok, {{ counts.warn }} warnings, {{ counts.fail }} failing
+  </span>
+  <span class="hc-actions">
+    {% if live %}<span>Live checks ran just now.</span>{% endif %}
+    <a class="button" href="?">Refresh</a>
+    <a class="button default" href="?live=1" title="Makes one tiny real call to each configured AI engine">Run live checks</a>
+  </span>
+</div>
+<div class="hc-grid">
+  {% for section in sections %}
+  <div class="hc-card">
+    <h2>{{ section.title }} <span class="hc-dot {{ section.status }}"></span></h2>
+    {% for c in section.checks %}
+    <div class="hc-row">
+      <span class="hc-dot {{ c.status }}"></span>
+      <div><div class="n">{{ c.name }}</div><div class="d">{{ c.detail }}</div></div>
+      <span class="ms">{% if c.latency_ms is not None %}{{ c.latency_ms }} ms{% endif %}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

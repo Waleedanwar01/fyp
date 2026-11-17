@@ -1,0 +1,156 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-avtr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-avtr}
+      POSTGRES_DB: ${POSTGRES_DB:-avtr}
+    ports:
+      - "5432:5432"
+    volumes:
+      - avtr_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-avtr} -d ${POSTGRES_DB:-avtr}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Local test database, used only when running the backend test suite
+  # (`manage.py test`, via TEST_DATABASE_URL in .env) -- a separate
+  # service from `db` above so this is additive and doesn't change the
+  # full docker-compose dev stack's existing behavior. Not part of any
+  # `depends_on` chain: nothing but the test run itself needs it, and
+  # local dev (venv-based, this project's actual day-to-day workflow)
+  # starts it explicitly with `docker compose up -d db_test`.
+  #
+  # ~500 tests x many runs a week against a remote serverless Postgres
+  # (Neon) burns real compute-hours for no benefit and exhausted the
+  # free tier's monthly allowance once already -- this container is
+  # free, faster (no network round-trip per query), and disposable.
+  db_test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - avtr_test_postgres_data:/var/lib/postgresql/data
+      - ./docker/test-db-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment: &backend-env
+      SECRET_KEY: dev-only-secret-not-for-production
+      DEBUG: "True"
+      ALLOWED_HOSTS: "*"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-avtr}:${POSTGRES_PASSWORD:-avtr}@db:5432/${POSTGRES_DB:-avtr}
+      # Must be set explicitly, even though it's the same value as
+      # DATABASE_URL above (this local Postgres has no separate
+      # restricted/owner role split -- one role does everything). If
+      # left unset here, settings.py's load_dotenv() picks up whatever
+      # MIGRATE_DATABASE_URL happens to be in backend/.env on the host
+      # (bind-mounted in via the volume below) -- which for non-Docker
+      # dev against Neon is a *different, real* database. Since `migrate`/
+      # `showmigrations`/etc. specifically prefer MIGRATE_DATABASE_URL
+      # over DATABASE_URL, an unset value here means every migration
+      # inside this container would silently target that other database
+      # instead of this one, leaving this Postgres never actually migrated.
+      MIGRATE_DATABASE_URL: postgresql://${POSTGRES_USER:-avtr}:${POSTGRES_PASSWORD:-avtr}@db:5432/${POSTGRES_DB:-avtr}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
+    depends_on: &backend-deps
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # No curl in the python:3.12-slim base -- Python's already there.
+      # /admin/login/ is a real, always-200-when-up, unauthenticated page,
+      # so this proves migrate finished and runserver is actually serving,
+      # not just that the process started.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/admin/login/')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  # Runs Celery tasks (core/tasks.py) off the same Redis broker the
+  # backend enqueues them onto -- no AI provider calls yet, this just
+  # proves a job placed on the queue actually gets picked up and run.
+  # Waits on `backend` (not just db/redis) being healthy so migrations
+  # have definitely already run before it starts querying the database.
+  celery_worker:
+    build: ./backend
+    command: celery -A config worker --loglevel=info
+    volumes:
+      - ./backend:/app
+    environment: *backend-env
+    depends_on:
+      <<: *backend-deps
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # Pings the worker over the broker -- confirms both "process is up"
+      # and "it can actually talk to Redis", not just that celery started.
+      test: ["CMD-SHELL", "celery -A config inspect ping -d celery@$$HOSTNAME --timeout 5 | grep -q OK"]
+      interval: 10s
+      timeout: 8s
+      retries: 10
+      start_period: 15s
+
+  # Fires the periodic tasks in CELERY_BEAT_SCHEDULE (config/settings.py)
+  # on their schedule, handing each off to `celery_worker` above the same
+  # way a manually-triggered task would be.
+  celery_beat:
+    build: ./backend
+    command: celery -A config beat --loglevel=info
+    volumes:
+      - ./backend:/app
+    environment: *backend-env
+    depends_on:
+      <<: *backend-deps
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    volumes:
+      - ./frontend:/app
+      # Named volume shadows the bind mount for just this one directory,
+      # so the container's own (Linux-native) node_modules from the image
+      # build isn't replaced by whatever's (or isn't) on the Windows host.
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  avtr_postgres_data:
+  avtr_test_postgres_data:
+  frontend_node_modules:

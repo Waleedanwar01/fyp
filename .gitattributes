@@ -1,0 +1,8 @@
+# Binary assets must never get line-ending conversion (it corrupts PDFs).
+*.pdf binary
+*.png binary
+*.jpg binary
+*.mp4 binary
+*.ico binary
+# Shell scripts run inside Linux containers -- always LF.
+*.sh text eol=lf

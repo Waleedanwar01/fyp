@@ -1,0 +1,8 @@
+[tool.ruff]
+extend-exclude = ["*/migrations/*", "venv"]
+
+[tool.ruff.lint]
+ignore = [
+    "RUF012",  # mutable class attrs (permission_classes = [...], etc.) are idiomatic Django/DRF
+    "BLE001",  # do not catch blind exception -- resilience fallback patterns used across tasks and webhooks
+]
